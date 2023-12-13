@@ -2,12 +2,16 @@ const Questions = require("./models/Questions");
 const Answers = require("./models/Answers");
 const Photos = require("./models/Photos");
 const Ids = require("./models/Id");
+const myCache = require("./middleware/cache");
+
+const checkCache = (key) => myCache.get(key);
+const addCache = (key, data) => myCache.set(key, data, 60);
 
 module.exports = {
   getQuestions: async (req, res) => {
-    const product_id = req.params.product_id;
-    const page = req.params.page || 1;
-    const count = req.params.count || 5;
+    const product_id = +req.params.product_id;
+    const page = +req.params.page || 1;
+    const count = +req.params.count || 5;
     const response = {};
 
     if (!product_id) {
@@ -17,24 +21,137 @@ module.exports = {
       return;
     }
 
+    const key = req.originalUrl || req.url;
+    const cached = checkCache(key);
+    if (cached) {
+      res.status(200).json(cached);
+      return;
+    }
+
     response.product_id = product_id;
 
     try {
-      const data = await Questions.find({ product_id: product_id })
-        .select({
-          _id: 0,
-          question_id: "$id",
-          question_body: "$body",
-          question_date: "$created_at",
-          question_helpfulness: "$helpfulness",
-          reported: 1,
-        })
-        .skip((page - 1) * count)
-        .limit(count)
-        .lean();
+      const results = await Questions.aggregate([
+        {
+          $match: {
+            product_id: product_id,
+          },
+        },
+        {
+          $skip: (page - 1) * count,
+        },
+        {
+          $limit: count,
+        },
+        {
+          $project: {
+            _id: 0,
+            question_id: "$id",
+            question_body: "$body",
+            question_date: "$created_at",
+            asker_name: 1,
+            reported: 1,
+            question_helpfulness: "$helpfulness",
+          },
+        },
+        {
+          $lookup: {
+            from: "answers",
+            localField: "question_id",
+            foreignField: "question_id",
+            as: "answers",
+          },
+        },
+        {
+          $unwind: {
+            path: "$answers",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $lookup: {
+            from: "photos",
+            localField: "answers.id",
+            foreignField: "answer_id",
+            as: "answers.photos",
+          },
+        },
+        {
+          $group: {
+            _id: "$question_id",
+            question_id: { $first: "$question_id" },
+            question_body: { $first: "$question_body" },
+            question_date: { $first: "$question_date" },
+            asker_name: { $first: "$asker_name" },
+            reported: { $first: "$reported" },
+            question_helpfulness: { $first: "$question_helpfulness" },
+            answers: {
+              $push: {
+                $cond: [
+                  {
+                    $or: [
+                      { $eq: ["$answers.id", null] },
+                      { $eq: [{ $size: "$answers.photos" }, 0] },
+                    ],
+                  },
+                  null,
+                  {
+                    id: "$answers.id",
+                    body: "$answers.body",
+                    date: "$answers.created_at",
+                    answerer_name: "$answers.answer_name",
+                    helpfulness: "$answers.helpfulness",
+                    photos: {
+                      $map: {
+                        input: "$answers.photos",
+                        as: "photo",
+                        in: {
+                          id: "$$photo.id",
+                          url: "$$photo.url",
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            question_id: 1,
+            question_body: 1,
+            question_date: 1,
+            asker_name: 1,
+            reported: 1,
+            question_helpfulness: 1,
+            answers: {
+              $arrayToObject: {
+                $map: {
+                  input: {
+                    $filter: {
+                      input: "$answers",
+                      as: "answer",
+                      cond: { $ne: ["$$answer", null] },
+                    },
+                  },
+                  as: "answer",
+                  in: {
+                    k: { $toString: "$$answer.id" },
+                    v: "$$answer",
+                  },
+                },
+              },
+            },
+          },
+        },
+      ]);
 
-      response.results = data;
+      response.results = results;
+      console.log(response);
       res.status(200).json(response);
+      addCache(key, response, 60);
     } catch (err) {
       console.log(err);
       res.sendStatus(400);
@@ -42,9 +159,9 @@ module.exports = {
   },
 
   getQuestionAnswers: async (req, res) => {
-    const question_id = req.params.question_id;
-    const page = req.query.page || 1;
-    const count = req.query.count || 5;
+    const question_id = +req.params.question_id;
+    const page = +req.query.page || 1;
+    const count = +req.query.count || 5;
     const response = {};
 
     if (!question_id) {
@@ -58,33 +175,88 @@ module.exports = {
     response.page = page;
     response.count = count;
 
-    console.log(response, req.query);
+    const key = req.originalUrl || req.url;
+    const cached = checkCache(key);
+    if (cached) {
+      res.status(200).json(cached);
+      return;
+    }
 
     try {
-      const data = await Answers.find({ question_id: question_id })
-        .select({
-          _id: 0,
-          answer_id: "$id",
-          body: 1,
-          date: "$created_at",
-          answerer_name: 1,
-          helpfulness: 1,
-        })
-        .skip((page - 1) * count)
-        .limit(count)
-        .lean();
-
-      const photoPromises = data.map(async (answer) => {
-        const photos = await Photos.find({ answer_id: answer.answer_id });
-        answer.date = new Date(answer.date).toISOString();
-        answer.photos = photos;
-        return answer;
-      });
-
-      const results = await Promise.all(photoPromises);
+      const results = await Answers.aggregate([
+        {
+          $match: { question_id: question_id },
+        },
+        {
+          $skip: (page - 1) * count,
+        },
+        {
+          $limit: count,
+        },
+        {
+          $project: {
+            _id: 0,
+            id: 1,
+            body: 1,
+            created_at: 1,
+            answerer_name: 1,
+            helpfulness: 1,
+          },
+        },
+        {
+          $lookup: {
+            from: "photos",
+            localField: "id",
+            foreignField: "answer_id",
+            as: "photos",
+          },
+        },
+        {
+          $unwind: {
+            path: "$photos",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            answer_id: "$id",
+            body: 1,
+            date: "$created_at",
+            answerer_name: 1,
+            helpfulness: 1,
+            photos: {
+              url: 1,
+              id: 1,
+            },
+          },
+        },
+        {
+          $group: {
+            _id: "$answer_id",
+            answer_id: { $first: "$answer_id" },
+            body: { $first: "$body" },
+            date: { $first: "$date" },
+            answerer_name: { $first: "$answerer_name" },
+            helpfulness: { $first: "$helpfulness" },
+            photos: { $push: "$photos" },
+          },
+        },
+        {
+          $project: {
+            answer_id: 1,
+            body: 1,
+            date: 1,
+            answerer_name: 1,
+            helpfulness: 1,
+            photos: 1,
+          },
+        },
+      ]);
 
       response.results = results;
       res.status(200).json(response);
+      addCache(key, response, 60);
     } catch (err) {
       console.error(err);
       res.sendStatus(400);
@@ -106,7 +278,10 @@ module.exports = {
     }
 
     try {
-      const data = await Ids.findOne({ type: "questions" }).lean();
+      const data = await Ids.findOneAndUpdate(
+        { type: "questions" },
+        { $inc: { id: 1 } },
+      ).lean();
       const toInsert = {
         product_id,
         body,
@@ -115,7 +290,6 @@ module.exports = {
       };
       if (asker_email.length) toInsert.asker_email = asker_email;
       const results = await Questions.create(toInsert);
-      await Ids.findOneAndUpdate({ type: "questions" }, { $inc: { id: 1 } });
       res.status(201).json(results);
     } catch (err) {
       console.error(err);
