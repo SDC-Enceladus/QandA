@@ -32,8 +32,8 @@ class CSVCleaner extends Transform {
       if (key !== trimKey) delete row[key];
     }
 
-    if (!row.date_written) row.date_written = new Date();
-    else row.date_written = new Date(+row.date_written);
+    if (!row.date_written) row.date_written = new Date().toISOString();
+    else row.date_written = new Date(+row.date_written).toISOString();
 
     row.reported = row.reported ? !!+row.reported : false;
 

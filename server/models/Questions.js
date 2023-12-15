@@ -1,7 +1,6 @@
-const db = require("./../database/index");
 const mongoose = require("mongoose");
 
-const questionSchema = new db.Schema({
+const questionSchema = new mongoose.Schema({
   id: {
     type: Number,
     required: true,

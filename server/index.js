@@ -2,6 +2,7 @@ const express = require("express");
 const morgan = require("morgan");
 const router = require("./routes.js");
 const myCache = require("./middleware/cache.js");
+require("./database/index.js");
 require("dotenv").config();
 const app = express();
 
